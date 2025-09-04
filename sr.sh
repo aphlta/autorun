@@ -186,8 +186,9 @@ _sr() {
         esac
         
         # search and jump
-        local echo fnd last list opt typ path_filter execute_cmd debug_mode
-        execute_cmd=1
+        local echo fnd last list opt typ path_filter execute_cmd debug_mode print_only
+        execute_cmd=1  # Default to execute mode
+        print_only=0   # Default to not print-only mode
         # Check for global debug mode or local debug flag
         debug_mode=${_SR_DEBUG:-0}
         
@@ -197,19 +198,21 @@ _sr() {
             if [ "$parsing_options" = "1" ]; then
                 case "$1" in
                     -h|--help) 
-                        echo "sr [-hlrted] [command] [path]" >&2;
+                        echo "sr [-hlrtjpd] [command] [path]" >&2;
                         echo "  -h: show help" >&2;
                         echo "  -l: list matches" >&2;
                         echo "  -r: rank by frequency" >&2;
                         echo "  -t: rank by recency" >&2;
-                        echo "  -e: execute the matched command after jumping" >&2;
+                        echo "  -j: jump only (don't execute command)" >&2;
+                        echo "  -p: print command only (don't jump or execute)" >&2;
                         echo "  -d: debug mode - show command before execution and wait for confirmation" >&2;
                         echo "  --debug-on: enable global debug mode (persistent)" >&2;
                         echo "  --debug-off: disable global debug mode" >&2;
                         echo "Examples:" >&2;
-                        echo "  sr vim           # jump to dir where vim was used" >&2;
-                        echo "  sr -e vim main.py # jump to dir and execute vim main.py" >&2;
-                        echo "  sr -d -e vim     # debug mode: show command before execution" >&2;
+                        echo "  sr vim           # jump to dir and execute vim command (default)" >&2;
+                        echo "  sr -j vim        # jump to dir only, don't execute" >&2;
+                        echo "  sr -p vim        # print command only, don't jump or execute" >&2;
+                        echo "  sr -d vim        # debug mode: show command before execution" >&2;
                         echo "  sr --debug-on    # enable global debug mode" >&2;
                         echo "  sr --debug-off   # disable global debug mode" >&2;
                         echo "  sr vim /tmp      # jump to dir under /tmp where vim was used" >&2;
@@ -225,8 +228,9 @@ _sr() {
                     -l) list=1;;
                     -r) typ="rank";;
                     -t) typ="recent";;
-                    -d) debug_mode=1;;  # Local debug mode override
-                    -j) execute_cmd=0;;
+                    -j) execute_cmd=0;;  # Jump only, don't execute
+                    -p) print_only=1;;   # Print command only, don't jump or execute
+                    -d) debug_mode=1;;   # Local debug mode override
                     /*) path_filter="$1"; parsing_options=0;; # Path argument, stop parsing options
                     -*) ;; # Unknown option, ignore
                     *) fnd="$fnd${fnd:+ }$1"; parsing_options=0;; # Non-option argument, stop parsing options
@@ -245,7 +249,7 @@ _sr() {
         [ -f "$datafile" ] || return
         
         local target_result
-        target_result="$( < <( _sr_entries ) \awk -v t="$(\date +%s)" -v list="$list" -v typ="$typ" -v q="$fnd" -v path_filter="$path_filter" -v execute_cmd="$execute_cmd" -v debug_mode="$debug_mode" -F"|" '
+        target_result="$( < <( _sr_entries ) \awk -v t="$(\date +%s)" -v list="$list" -v typ="$typ" -v q="$fnd" -v path_filter="$path_filter" -v execute_cmd="$execute_cmd" -v debug_mode="$debug_mode" -v print_only="$print_only" -F"|" '
             function frecent(rank, time) {
                 # relate frequency and time
                 dx = t - time
@@ -258,6 +262,12 @@ _sr() {
                         if( matches[x] ) {
                             printf "%-10s %s\n", matches[x], x | cmd
                         }
+                    }
+                } else if( print_only ) {
+                    if( best_cmd ) {
+                        print "PRINT_ONLY|" best_match "|" best_cmd
+                    } else {
+                        print "PRINT_ONLY|" best_match "|NO_COMMAND"
                     }
                 } else {
                     if( execute_cmd && best_cmd ) {
@@ -337,6 +347,23 @@ _sr() {
             if [ "$target_result" ]; then
                 if [ "$list" ]; then
                     _sr_debug_log "SEARCH" "List mode: showing matches for query: '$fnd' path_filter: '$path_filter'"
+                    return
+                elif [ "$print_only" = "1" ]; then
+                    # Handle print-only mode
+                    if [[ "$target_result" == PRINT_ONLY* ]]; then
+                        local result_without_prefix="${target_result#PRINT_ONLY|}"
+                        local target_dir="${result_without_prefix%%|*}"
+                        local target_cmd="${result_without_prefix#*|}"
+                        
+                        _sr_debug_log "PRINT_ONLY" "Print mode: directory: '$target_dir' command: '$target_cmd'"
+                        
+                        echo "\033[1;33m==> Directory:\033[0m \033[1;36m$target_dir\033[0m"
+                        if [ "$target_cmd" != "NO_COMMAND" ] && [ "$target_cmd" != "$target_dir" ]; then
+                            echo "\033[1;33m==> Command:\033[0m \033[1;35m$target_cmd\033[0m"
+                        else
+                            echo "\033[1;33m==> Command:\033[0m \033[1;31mNo specific command found\033[0m"
+                        fi
+                    fi
                     return
                 else
                     # Parse result - could be "dir" or "dir|command"
