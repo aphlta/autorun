@@ -308,18 +308,18 @@ _sr() {
                     local target_dir="${target_result%%|*}"
                     local target_cmd="${target_result#*|}"
                     
-                    echo "Jumping to: $target_dir"
+                    echo "\033[1;32m==> Jumping to:\033[0m \033[1;36m$target_dir\033[0m"
                     builtin cd "$target_dir"
                     
                     # Execute command if -e option was used and we have a command
                     if [ "$execute_cmd" = "1" ] && [ "$target_cmd" != "$target_dir" ]; then
                         if [ "$debug_mode" = "1" ]; then
-                            echo "Debug mode: Will execute command: $target_cmd"
+                            echo "\033[1;33m==> Debug mode: Will execute command:\033[0m \033[1;35m$target_cmd\033[0m"
                             echo -n "Do you want to execute this command? [y/N]: "
                             read -r confirm
                             case "$confirm" in
                                 [Yy]|[Yy][Ee][Ss])
-                                    echo "Executing: $target_cmd"
+                                    echo "\033[1;32m==> Executing:\033[0m \033[1;35m$target_cmd\033[0m"
                                     eval "$target_cmd"
                                     # Manually increase the weight of the executed command
                                     _sr --add "$target_cmd" "$target_dir"
@@ -329,7 +329,7 @@ _sr() {
                                     ;;
                             esac
                         else
-                            echo "Executing: $target_cmd"
+                            echo "\033[1;32m==> Executing:\033[0m \033[1;35m$target_cmd\033[0m"
                             eval "$target_cmd"
                             # Manually increase the weight of the executed command
                             _sr --add "$target_cmd" "$target_dir"
