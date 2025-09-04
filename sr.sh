@@ -1,14 +1,14 @@
 #!/bin/bash
-# ar.sh - Auto Record and Jump to command history
+# sr.sh - Auto Record and Jump to command history
 # Copyright (c) 2024. Licensed under MIT license.
 
 # maintains a jump-list of the commands you actually use with their directories
 #
 # INSTALL:
 #     * put something like this in your .bashrc/.zshrc:
-#         . /path/to/ar.sh
+#         . /path/to/sr.sh
 #     * run commands for a while to build up the db
-#     * use: ar 'partial_command' to jump to the directory where you ran similar commands
+#     * use: sr 'partial_command' to jump to the directory where you ran similar commands   
 #
 # CONFIGURATION:
 #     set $_SR_DATA in .bashrc/.zshrc to change the datafile (default ~/.sr).
@@ -20,15 +20,15 @@
 #     Note: Dangerous commands (rm, sudo, etc.) are automatically ignored for safety.
 #
 # USE:
-#     * ar foo        # cd to most frecent dir where you ran commands matching foo
-#     * ar -l foo     # list matches instead of cd
-#     * ar -r foo     # cd to highest ranked dir matching foo
-#     * ar -t foo     # cd to most recently accessed dir matching foo
-#     * ar -e foo     # cd to dir and execute the matched command
-#     * ar -d -e foo  # debug mode: show command before execution and wait for confirmation
-#     * ar --debug-on # enable global debug mode (persistent)
-#     * ar --debug-off # disable global debug mode
-#     * ar -h         # show help message
+#     * sr foo        # cd to most frecent dir where you ran commands matching foo
+#     * sr -l foo     # list matches instead of cd
+#     * sr -r foo     # cd to highest ranked dir matching foo
+#     * sr -t foo     # cd to most recently accessed dir matching foo
+#     * sr -e foo     # cd to dir and execute the matched command
+#     * sr -d -e foo  # debug mode: show command before execution and wait for confirmation
+#     * sr --debug-on # enable global debug mode (persistent)
+#     * sr --debug-off # disable global debug mode
+#     * sr -h         # show help message
 
 [ -d "${_SR_DATA:-$HOME/.sr}" ] && {
     echo "ERROR: sr.sh's datafile (${_SR_DATA:-$HOME/.sr}) is a directory."
