@@ -216,6 +216,7 @@ _sr() {
                         echo "  sr --debug-on    # enable global debug mode" >&2;
                         echo "  sr --debug-off   # disable global debug mode" >&2;
                         echo "  sr vim /tmp      # jump to dir under /tmp where vim was used" >&2;
+                        echo "  sr git work-dir  # jump to dir containing 'work-dir' where git was used" >&2;
                         echo "  sr -l git        # list all dirs and commands where git was used" >&2;
                         if [ "$_SR_DEBUG" = "1" ]; then
                             echo "" >&2;
@@ -238,8 +239,15 @@ _sr() {
             else
                 # No longer parsing options, everything is a search term or path
                 case "$1" in
-                    /*) path_filter="$1";; # Path argument starting with /
-                    *) fnd="$fnd${fnd:+ }$1";; # Search term
+                    /*) path_filter="$1";; # Absolute path argument
+                    *) 
+                        # If we already have a search term, treat this as path filter
+                        if [ -n "$fnd" ]; then
+                            path_filter="$1"
+                        else
+                            fnd="$fnd${fnd:+ }$1"
+                        fi
+                        ;;
                 esac
             fi
             shift
@@ -285,8 +293,8 @@ _sr() {
                 dir = $1
                 cmd = $2
                 
-                # Apply path filter if specified
-                if( path_filter && index(dir, path_filter) != 1 ) {
+                # Apply path filter if specified (substring matching)
+                if( path_filter && index(dir, path_filter) == 0 ) {
                     next
                 }
                 

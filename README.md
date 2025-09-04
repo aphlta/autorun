@@ -95,8 +95,12 @@ export _SR_NO_PROMPT_COMMAND=1
 
 ### 语法
 ```bash
-sr [选项] <命令> <路径前缀>
+sr [选项] <命令> <路径过滤器>
 ```
+
+**路径过滤器支持两种模式：**
+- **绝对路径前缀匹配**: `/home/alex/project` - 匹配以该路径开头的目录
+- **子串模糊匹配**: `work-dir` - 匹配包含该子串的所有目录路径
 
 ### 使用场景
 - **多项目开发**: 当您在多个项目目录中都使用git时，可以指定特定项目路径
@@ -107,15 +111,21 @@ sr [选项] <命令> <路径前缀>
 ```bash
 # 问题：git diff在很多目录都执行过，但想跳转到特定项目
 sr git diff                    # 可能跳转到任意一个git目录
-sr git diff /home/alex/project # 只在/home/alex/project下查找
+sr git diff /home/alex/project # 只在/home/alex/project下查找（前缀匹配）
+sr git diff work-dir           # 跳转到包含'work-dir'的目录（模糊匹配）
 
-# 列出特定路径下的所有匹配项
+# 前缀匹配示例
 sr -l npm /home/alex/work      # 只显示/home/alex/work下的npm命令
 sr -l docker /opt              # 只显示/opt下的docker命令
 
+# 模糊匹配示例
+sr -l bash work-dir            # 显示所有包含'work-dir'的目录中的bash命令
+sr -l scp build                # 显示所有包含'build'的目录中的scp命令
+sr vim test                    # 跳转到包含'test'的目录中最常用vim的地方
+
 # 其他选项组合
 sr -j vim /tmp                 # 只跳转，不执行，限制在/tmp路径
-sr -p git /home/projects       # 只打印，限制在/home/projects路径
+sr -p git work-dir             # 只打印，模糊匹配包含work-dir的路径
 ```
 
 ## 数据格式
