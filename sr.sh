@@ -11,11 +11,12 @@
 #     * use: ar 'partial_command' to jump to the directory where you ran similar commands
 #
 # CONFIGURATION:
-#     set $_AR_DATA in .bashrc/.zshrc to change the datafile (default ~/.ar).
-#     set $_AR_MAX_SCORE lower to age entries out faster (default 9000).
-#     set $_AR_NO_PROMPT_COMMAND if you're handling PROMPT_COMMAND yourself.
-#     set $_AR_EXCLUDE_DIRS to an array of directories to exclude.
-#     set $_AR_IGNORE_COMMANDS to a space-separated list of commands to ignore.
+#     set $_SR_DATA in .bashrc/.zshrc to change the datafile (default ~/.sr).
+#     set $_SR_MAX_SCORE lower to age entries out faster (default 9000).
+#     set $_SR_NO_PROMPT_COMMAND if you're handling PROMPT_COMMAND yourself.
+#     set $_SR_EXCLUDE_DIRS to an array of directories to exclude.
+#     set $_SR_IGNORE_COMMANDS to a space-separated list of commands to ignore.
+#     set $_SR_DEBUG=1 to enable global debug mode (persistent until disabled).
 #     Note: Dangerous commands (rm, sudo, etc.) are automatically ignored for safety.
 #
 # USE:
@@ -23,14 +24,18 @@
 #     * ar -l foo     # list matches instead of cd
 #     * ar -r foo     # cd to highest ranked dir matching foo
 #     * ar -t foo     # cd to most recently accessed dir matching foo
+#     * ar -e foo     # cd to dir and execute the matched command
+#     * ar -d -e foo  # debug mode: show command before execution and wait for confirmation
+#     * ar --debug-on # enable global debug mode (persistent)
+#     * ar --debug-off # disable global debug mode
 #     * ar -h         # show help message
 
-[ -d "${_AR_DATA:-$HOME/.ar}" ] && {
-    echo "ERROR: ar.sh's datafile (${_AR_DATA:-$HOME/.ar}) is a directory."
+[ -d "${_SR_DATA:-$HOME/.sr}" ] && {
+    echo "ERROR: sr.sh's datafile (${_SR_DATA:-$HOME/.sr}) is a directory."
 }
 
-_ar() {
-    local datafile="${_AR_DATA:-$HOME/.ar}"
+_sr() {
+    local datafile="${_SR_DATA:-$HOME/.sr}"
     
     # if symlink, dereference
     [ -h "$datafile" ] && datafile=$(readlink "$datafile")
@@ -38,7 +43,7 @@ _ar() {
     # bail if we don't own ~/.ar
     [ -f "$datafile" -a ! -O "$datafile" ] && return
     
-    _ar_entries() {
+    _sr_entries() {
         [ -f "$datafile" ] || return
         
         local line
@@ -56,14 +61,17 @@ _ar() {
         local cmd="$1"
         local dir="$2"
         
+        # Clean up command: remove newlines and extra spaces
+        cmd="$(echo "$cmd" | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ *//;s/ *$//')"
+        
         # skip empty commands or basic navigation
         [ -z "$cmd" ] && return
         case "$cmd" in
-            cd|cd\ *|ls|ls\ *|pwd|clear|exit) return;;
+            ll|ll\ *|z|z\ *|cd|cd\ *|ls|ls\ *|pwd|clear|exit) return;;
         esac
         
         # Default dangerous commands blacklist
-        local dangerous_commands="rm rmdir mv cp dd chmod chown sudo su killall pkill halt reboot shutdown init mount umount fdisk mkfs fsck ls ll cd z"
+        local dangerous_commands="rm rmdir mv cp dd chmod chown sudo su killall pkill halt reboot shutdown init mount umount fdisk mkfs fsck df du"
         
         # Check against dangerous commands (only check base command, not parameters)
         local cmd_base="$(echo "$cmd" | awk '{print $1}')"
@@ -72,26 +80,26 @@ _ar() {
         done
         
         # Check against user-defined ignored commands (only check base command)
-        if [ -n "$_AR_IGNORE_COMMANDS" ]; then
-            for ignore_cmd in $_AR_IGNORE_COMMANDS; do
+        if [ -n "$_SR_IGNORE_COMMANDS" ]; then
+            for ignore_cmd in $_SR_IGNORE_COMMANDS; do
                 [ "$cmd_base" = "$ignore_cmd" ] && return
             done
         fi
         
         # don't track excluded directories
-        if [ ${#_AR_EXCLUDE_DIRS[@]} -gt 0 ]; then
+        if [ ${#_SR_EXCLUDE_DIRS[@]} -gt 0 ]; then
             local exclude
-            for exclude in "${_AR_EXCLUDE_DIRS[@]}"; do
+            for exclude in "${_SR_EXCLUDE_DIRS[@]}"; do
                 case "$dir" in "$exclude"*) return;; esac
             done
         fi
         
         # maintain the data file
         local tempfile="$datafile.$RANDOM"
-        local score=${_AR_MAX_SCORE:-9000}
+        local score=${_SR_MAX_SCORE:-9000}
         local key="$dir|$cmd"
         
-        _ar_entries | \awk -v key="$key" -v now="$(\date +%s)" -v score=$score -F"|" '
+        _sr_entries | \awk -v key="$key" -v now="$(\date +%s)" -v score=$score -F"|" '
             BEGIN {
                 rank[key] = 1
                 time[key] = now
@@ -131,30 +139,59 @@ _ar() {
         fi
         
     else
+        # Handle global debug mode commands first
+        case "$1" in
+            --debug-on)
+                export _SR_DEBUG=1
+                echo "Global debug mode enabled. Use 'sr --debug-off' to disable."
+                return;;
+            --debug-off)
+                unset _SR_DEBUG
+                echo "Global debug mode disabled."
+                return;;
+        esac
+        
         # search and jump
-        local echo fnd last list opt typ path_filter execute_cmd
+        local echo fnd last list opt typ path_filter execute_cmd debug_mode
         execute_cmd=1
+        # Check for global debug mode or local debug flag
+        debug_mode=${_SR_DEBUG:-0}
+        
         # Parse arguments - handle options first, then search terms
         local parsing_options=1
         while [ "$1" ]; do 
             if [ "$parsing_options" = "1" ]; then
                 case "$1" in
                     -h|--help) 
-                        echo "ar [-hlrte] [command] [path]" >&2; 
+                        echo "sr [-hlrted] [command] [path]" >&2;
                         echo "  -h: show help" >&2;
                         echo "  -l: list matches" >&2;
                         echo "  -r: rank by frequency" >&2;
                         echo "  -t: rank by recency" >&2;
                         echo "  -e: execute the matched command after jumping" >&2;
+                        echo "  -d: debug mode - show command before execution and wait for confirmation" >&2;
+                        echo "  --debug-on: enable global debug mode (persistent)" >&2;
+                        echo "  --debug-off: disable global debug mode" >&2;
                         echo "Examples:" >&2;
-                        echo "  ar vim           # jump to dir where vim was used" >&2;
-                        echo "  ar -e vim main.py # jump to dir and execute vim main.py" >&2;
-                        echo "  ar vim /tmp      # jump to dir under /tmp where vim was used" >&2;
-                        echo "  ar -l git        # list all dirs where git was used" >&2;
+                        echo "  sr vim           # jump to dir where vim was used" >&2;
+                        echo "  sr -e vim main.py # jump to dir and execute vim main.py" >&2;
+                        echo "  sr -d -e vim     # debug mode: show command before execution" >&2;
+                        echo "  sr --debug-on    # enable global debug mode" >&2;
+                        echo "  sr --debug-off   # disable global debug mode" >&2;
+                        echo "  sr vim /tmp      # jump to dir under /tmp where vim was used" >&2;
+                        echo "  sr -l git        # list all dirs where git was used" >&2;
+                        if [ "$_SR_DEBUG" = "1" ]; then
+                            echo "" >&2;
+                            echo "Global debug mode is currently ENABLED." >&2;
+                        else
+                            echo "" >&2;
+                            echo "Global debug mode is currently DISABLED." >&2;
+                        fi
                         return;;
                     -l) list=1;;
                     -r) typ="rank";;
                     -t) typ="recent";;
+                    -d) debug_mode=1;;  # Local debug mode override
                     -j) execute_cmd=0;;
                     /*) path_filter="$1"; parsing_options=0;; # Path argument, stop parsing options
                     -*) ;; # Unknown option, ignore
@@ -174,7 +211,7 @@ _ar() {
         [ -f "$datafile" ] || return
         
         local target_result
-        target_result="$( < <( _ar_entries ) \awk -v t="$(\date +%s)" -v list="$list" -v typ="$typ" -v q="$fnd" -v path_filter="$path_filter" -v execute_cmd="$execute_cmd" -F"|" '
+        target_result="$( < <( _sr_entries ) \awk -v t="$(\date +%s)" -v list="$list" -v typ="$typ" -v q="$fnd" -v path_filter="$path_filter" -v execute_cmd="$execute_cmd" -v debug_mode="$debug_mode" -F"|" '
             function frecent(rank, time) {
                 # relate frequency and time
                 dx = t - time
@@ -217,20 +254,22 @@ _ar() {
                 
                 # Match against command or full command line
                 cmd_match = 0
+                
+                # In execute mode, skip sr/_sr commands to prevent recursion
+                if( execute_cmd && cmd ~ /^(_sr|sr) / ) {
+                    next
+                }
+                
                 if( q == "" || cmd ~ q ) {
                     cmd_match = 1
-                    # In execute mode, prefer non-ar commands
-                    cmd_priority = (execute_cmd && cmd !~ /^ar /) ? rank * 2 : rank
-                    if( !matches[dir] || matches[dir] < cmd_priority ) {
-                        matches[dir] = cmd_priority
+                    if( !matches[dir] || matches[dir] < rank ) {
+                        matches[dir] = rank
                         cmd_matches[dir] = cmd
                     }
                 } else if( tolower(cmd) ~ tolower(q) ) {
                     cmd_match = 1
-                    # In execute mode, prefer non-ar commands
-                    cmd_priority = (execute_cmd && cmd !~ /^ar /) ? rank * 2 : rank
-                    if( !imatches[dir] || imatches[dir] < cmd_priority ) {
-                        imatches[dir] = cmd_priority
+                    if( !imatches[dir] || imatches[dir] < rank ) {
+                        imatches[dir] = rank
                         icmd_matches[dir] = cmd
                     }
                 }
@@ -274,8 +313,27 @@ _ar() {
                     
                     # Execute command if -e option was used and we have a command
                     if [ "$execute_cmd" = "1" ] && [ "$target_cmd" != "$target_dir" ]; then
-                        echo "Executing: $target_cmd"
-                        eval "$target_cmd"
+                        if [ "$debug_mode" = "1" ]; then
+                            echo "Debug mode: Will execute command: $target_cmd"
+                            echo -n "Do you want to execute this command? [y/N]: "
+                            read -r confirm
+                            case "$confirm" in
+                                [Yy]|[Yy][Ee][Ss])
+                                    echo "Executing: $target_cmd"
+                                    eval "$target_cmd"
+                                    # Manually increase the weight of the executed command
+                                    _sr --add "$target_cmd" "$target_dir"
+                                    ;;
+                                *)
+                                    echo "Command execution cancelled."
+                                    ;;
+                            esac
+                        else
+                            echo "Executing: $target_cmd"
+                            eval "$target_cmd"
+                            # Manually increase the weight of the executed command
+                            _sr --add "$target_cmd" "$target_dir"
+                        fi
                     fi
                 fi
             fi
@@ -287,9 +345,12 @@ _ar() {
 }
 
 # Hook function to record commands (for bash compatibility)
-_ar_record_command() {
-    local cmd="$(history | tail -2 | head -1 | sed 's/^[ ]*[0-9]*[ ]*//')"
+_sr_record_command() {
+    local cmd="$(history | tail -1 | head -1 | sed 's/^[ ]*[0-9]*[ ]*//')"
     local dir="$PWD"
+    
+    # Clean up command: remove newlines and extra spaces
+    cmd="$(echo "$cmd" | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ *//;s/ *$//')"
     
     # Skip if command is empty or just whitespace
     [ -z "$(echo "$cmd" | tr -d ' \t\n')" ] && return
@@ -300,7 +361,7 @@ _ar_record_command() {
     esac
     
     # Default dangerous commands blacklist
-    local dangerous_commands="rm rmdir mv cp dd chmod chown sudo su killall pkill halt reboot shutdown init mount umount fdisk mkfs fsck ar cd z ls ll"
+    local dangerous_commands="rm rmdir mv cp dd chmod chown sudo su killall pkill halt reboot shutdown init mount umount fdisk mkfs fsck sr cd z ls ll"
     
     # Check against dangerous commands (only check base command, not parameters)
     local cmd_base="$(echo "$cmd" | awk '{print $1}')"
@@ -308,36 +369,44 @@ _ar_record_command() {
         [ "$cmd_base" = "$dangerous" ] && return
     done
     
+    # Also check if command contains sr command (for compound commands)
+    case "$cmd" in
+        sr\ *|*\ sr\ *|*"&&"\ sr\ *|*"|"\ sr\ *|*";sr"\ *|*";sr"|*"&&sr"\ *|*"|sr"\ *) return;;
+    esac
+    
     # Check against user-defined ignored commands (only check base command)
-    if [ -n "$_AR_IGNORE_COMMANDS" ]; then
-        for ignore_cmd in $_AR_IGNORE_COMMANDS; do
+    if [ -n "$_SR_IGNORE_COMMANDS" ]; then
+        for ignore_cmd in $_SR_IGNORE_COMMANDS; do
             [ "$cmd_base" = "$ignore_cmd" ] && return
         done
     fi
     
     # Record the command asynchronously
-    (_ar --add "$cmd" "$dir" &)
+    (_sr --add "$cmd" "$dir" &)
 }
 
 # Create alias
-alias ar='_ar 2>&1'
+alias sr='_sr 2>&1'
 
 # Shell integration
 if type compctl >/dev/null 2>&1; then
     # zsh
-    [ "$_AR_NO_PROMPT_COMMAND" ] || {
+    [ "$_SR_NO_PROMPT_COMMAND" ] || {
         # Add to precmd functions
-        _ar_precmd() {
+        _sr_precmd() {
             # Get the second-to-last command from history to avoid capturing the precmd function itself
             local cmd="$(fc -ln -2 | head -1 | sed 's/^[ \t]*//')"
             local dir="$PWD"
+            
+            # Clean up command: remove newlines and extra spaces
+            cmd="$(echo "$cmd" | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ *//;s/ *$//')"
             
             # Skip if command is empty or just whitespace
             [ -z "$(echo "$cmd" | tr -d ' \t\n')" ] && return
             
             # Skip if this is the same as the last recorded command (avoid duplicates)
-            [ "$cmd" = "$_AR_LAST_CMD" ] && return
-            _AR_LAST_CMD="$cmd"
+            [ "$cmd" = "$_SR_LAST_CMD" ] && return
+            _SR_LAST_CMD="$cmd"
             
             # Apply filtering logic before recording
             case "$cmd" in
@@ -345,7 +414,7 @@ if type compctl >/dev/null 2>&1; then
             esac
             
             # Default dangerous commands blacklist
-            local dangerous_commands="rm rmdir mv cp dd chmod chown sudo su killall pkill halt reboot shutdown init mount umount fdisk mkfs fsck"
+            local dangerous_commands="rm rmdir mv cp dd chmod chown sudo su killall pkill halt reboot shutdown init mount umount fdisk mkfs fsck sr cd z ls ll"
             
             # Check against dangerous commands (only check base command, not parameters)
             local cmd_base="$(echo "$cmd" | awk '{print $1}')"
@@ -353,26 +422,31 @@ if type compctl >/dev/null 2>&1; then
                 [ "$cmd_base" = "$dangerous" ] && return
             done
             
+            # Also check if command contains sr command (for compound commands)
+            case "$cmd" in
+                sr\ *|*\ sr\ *|*"&&"\ sr\ *|*"|"\ sr\ *|*";sr"\ *|*";sr"|*"&&sr"\ *|*"|sr"\ *) return;;
+            esac
+            
             # Check against user-defined ignored commands (only check base command)
-            if [ -n "$_AR_IGNORE_COMMANDS" ]; then
-                for ignore_cmd in $_AR_IGNORE_COMMANDS; do
+            if [ -n "$_SR_IGNORE_COMMANDS" ]; then
+                for ignore_cmd in $_SR_IGNORE_COMMANDS; do
                     [ "$cmd_base" = "$ignore_cmd" ] && return
                 done
             fi
             
             # Record the command asynchronously
-            (_ar --add "$cmd" "$dir" &)
+            (_sr --add "$cmd" "$dir" &)
         }
-        [[ -n "${precmd_functions[(r)_ar_precmd]}" ]] || {
-            precmd_functions[$(($#precmd_functions+1))]=_ar_precmd
+        [[ -n "${precmd_functions[(r)_sr_precmd]}" ]] || {
+            precmd_functions[$(($#precmd_functions+1))]=_sr_precmd
         }
     }
 elif type complete >/dev/null 2>&1; then
     # bash
-    [ "$_AR_NO_PROMPT_COMMAND" ] || {
+    [ "$_SR_NO_PROMPT_COMMAND" ] || {
         # Add to PROMPT_COMMAND
-        grep "_ar_record_command" <<< "$PROMPT_COMMAND" >/dev/null || {
-            PROMPT_COMMAND="$PROMPT_COMMAND"$'\n''_ar_record_command;'
+        grep "_sr_record_command" <<< "$PROMPT_COMMAND" >/dev/null || {
+            PROMPT_COMMAND="$PROMPT_COMMAND"$'\n''_sr_record_command;'
         }
     }
 fi
