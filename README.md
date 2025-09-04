@@ -50,10 +50,53 @@ sr --debug-on  # 启用全局调试模式（持久化）
 sr --debug-off # 禁用全局调试模式
 sr -h          # 显示帮助
 
-# 路径过滤功能
+# 智能匹配和路径过滤功能
+
+## 智能命令匹配
+sr git diff             # 智能匹配 'git diff' 命令（精确匹配优先）
+sr npm install          # 智能匹配 'npm install' 命令
+sr 'git diff'           # 精确匹配 'git diff' 命令（引号确保精确匹配）
+
+## 路径过滤功能
 sr git /home/project    # 只在/home/project路径下查找git命令
 sr -l npm /tmp          # 列出/tmp路径下所有npm命令
 sr vim /home/alex       # 跳转到/home/alex下最常用vim的目录
+sr git work-dir         # 模糊匹配：在包含'work-dir'的路径中查找git命令
+
+## 明确语法（使用 'on' 关键字）
+sr git on work          # 明确指定：在包含'work'的路径中查找git命令
+sr npm on project       # 明确指定：在包含'project'的路径中查找npm命令
+sr vim on /home/alex    # 明确指定：在/home/alex路径下查找vim命令
+```
+
+## 智能匹配工作原理
+
+`sr` 工具现在支持智能匹配，能够自动区分命令匹配和路径过滤：
+
+### 匹配优先级
+1. **精确匹配**：完全匹配命令字符串（优先级最高，分数加权1.5倍）
+2. **子字符串匹配**：命令包含查询字符串
+3. **模糊匹配**：使用正则表达式模式匹配
+
+### 智能参数识别
+当你输入 `sr command arg` 时，工具会智能判断 `arg` 的类型：
+
+- **常见子命令**：`diff`, `status`, `install`, `build` 等会被识别为命令的一部分
+- **路径特征**：包含 `/`, `-`, `_` 的参数会被识别为路径过滤器
+- **明确语法**：使用 `on` 关键字可以明确分隔命令和路径部分
+
+### 使用场景对比
+```bash
+# 这些命令会匹配 'git diff' 命令
+sr git diff
+sr 'git diff'
+
+# 这些命令会在包含 'work' 的路径中查找 git 命令
+sr git work-dir
+sr git on work
+
+# 这个命令会在 /home/project 路径下查找 git 命令
+sr git /home/project
 ```
 
 ## 配置选项

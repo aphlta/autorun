@@ -189,6 +189,7 @@ _sr() {
         local echo fnd last list opt typ path_filter execute_cmd debug_mode print_only
         execute_cmd=1  # Default to execute mode
         print_only=0   # Default to not print-only mode
+        on_keyword_found=0  # Track if 'on' keyword is found
         # Check for global debug mode or local debug flag
         debug_mode=${_SR_DEBUG:-0}
         
@@ -217,6 +218,8 @@ _sr() {
                         echo "  sr --debug-off   # disable global debug mode" >&2;
                         echo "  sr vim /tmp      # jump to dir under /tmp where vim was used" >&2;
                         echo "  sr git work-dir  # jump to dir containing 'work-dir' where git was used" >&2;
+                        echo "  sr git on work   # jump to dir containing 'work' where git was used (explicit syntax)" >&2;
+                        echo "  sr 'git diff'    # jump to dir where 'git diff' command was used (exact match)" >&2;
                         echo "  sr -l git        # list all dirs and commands where git was used" >&2;
                         if [ "$_SR_DEBUG" = "1" ]; then
                             echo "" >&2;
@@ -240,11 +243,36 @@ _sr() {
                 # No longer parsing options, everything is a search term or path
                 case "$1" in
                     /*) path_filter="$1";; # Absolute path argument
+                    on) 
+                        # 'on' keyword: everything before 'on' is command, everything after is path
+                        on_keyword_found=1
+                        ;;
                     *) 
-                        # If we already have a search term, treat this as path filter
-                        if [ -n "$fnd" ]; then
+                        if [ "$on_keyword_found" = "1" ]; then
+                            # After 'on' keyword, treat as path filter
                             path_filter="$1"
+                        elif [ -n "$fnd" ] && [ "$on_keyword_found" != "1" ]; then
+                            # Smart detection: check if this looks like a command subcommand
+                            case "$1" in
+                                # Common git subcommands
+                                add|commit|push|pull|diff|status|log|branch|checkout|merge|rebase|clone|fetch|reset|tag|stash|show|config|remote|init)
+                                    fnd="$fnd $1"  # Treat as part of command
+                                    ;;
+                                # Common other subcommands
+                                install|update|upgrade|remove|list|search|info|help|version|start|stop|restart|enable|disable|build|test|run|deploy)
+                                    fnd="$fnd $1"  # Treat as part of command
+                                    ;;
+                                # If it contains path-like characters, treat as path
+                                */*|*-*|*_*)
+                                    path_filter="$1"
+                                    ;;
+                                # Otherwise, treat as path filter for backward compatibility
+                                *)
+                                    path_filter="$1"
+                                    ;;
+                            esac
                         else
+                            # Build command search term
                             fnd="$fnd${fnd:+ }$1"
                         fi
                         ;;
@@ -286,7 +314,11 @@ _sr() {
                 }
             }
             BEGIN {
-                gsub(" ", ".*", q)
+                # Store original query for exact matching
+                q_exact = q
+                # Create fuzzy pattern for fallback
+                q_fuzzy = q
+                gsub(" ", ".*", q_fuzzy)
                 hi_rank = ihi_rank = -9999999999
             }
             NF >= 4 {
@@ -312,8 +344,22 @@ _sr() {
                     next
                 }
                 
-                if( q == "" || cmd ~ q ) {
+                # Smart matching: exact match first, then fuzzy match
+                if( q == "" ) {
                     cmd_match = 1
+                } else {
+                    # Try exact match first (higher priority)
+                    if( cmd == q_exact || index(cmd, q_exact) > 0 ) {
+                        cmd_match = 1
+                        rank = rank * 1.5  # Boost exact matches
+                    }
+                    # If no exact match, try fuzzy match
+                    else if( cmd ~ q_fuzzy ) {
+                        cmd_match = 1
+                    }
+                }
+                
+                if( cmd_match ) {
                     if( !matches[dir] || matches[dir] < rank ) {
                         matches[dir] = rank
                         cmd_matches[dir] = cmd
