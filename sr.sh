@@ -17,6 +17,7 @@
 #     set $_SR_EXCLUDE_DIRS to an array of directories to exclude.
 #     set $_SR_IGNORE_COMMANDS to a space-separated list of commands to ignore.
 #     set $_SR_DEBUG=1 to enable global debug mode (persistent until disabled).
+#     set $_SR_DEBUG_LOG to change the debug log file path (default ${_SR_DATA}.debug).
 #     Note: Dangerous commands (rm, sudo, etc.) are automatically ignored for safety.
 #
 # USE:
@@ -32,6 +33,33 @@
 
 [ -d "${_SR_DATA:-$HOME/.sr}" ] && {
     echo "ERROR: sr.sh's datafile (${_SR_DATA:-$HOME/.sr}) is a directory."
+}
+
+# Debug logging function
+_sr_debug_log() {
+    # Only log if debug mode is enabled
+    [ "$_SR_DEBUG" != "1" ] && return
+    
+    local debug_file="${_SR_DEBUG_LOG:-${_SR_DATA:-$HOME/.sr}.debug}"
+    local timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
+    local log_type="$1"
+    shift
+    local message="$*"
+    
+    # Create debug log entry
+    echo "[$timestamp] [$log_type] $message" >> "$debug_file"
+    
+    # If this is a data snapshot request, append current _SR_DATA content
+    if [ "$log_type" = "DATA_SNAPSHOT" ]; then
+        local datafile="${_SR_DATA:-$HOME/.sr}"
+        echo "[$timestamp] [DATA_CONTENT] === Current _SR_DATA file content ===" >> "$debug_file"
+        if [ -f "$datafile" ]; then
+            cat "$datafile" >> "$debug_file"
+        else
+            echo "[$timestamp] [DATA_CONTENT] _SR_DATA file does not exist" >> "$debug_file"
+        fi
+        echo "[$timestamp] [DATA_CONTENT] === End of _SR_DATA content ===" >> "$debug_file"
+    fi
 }
 
 _sr() {
@@ -143,7 +171,13 @@ _sr() {
         case "$1" in
             --debug-on)
                 export _SR_DEBUG=1
+                # Initialize debug log file
+                local debug_file="${_SR_DEBUG_LOG:-${_SR_DATA:-$HOME/.sr}.debug}"
+                echo "=== SR Debug Session Started at $(date) ===" > "$debug_file"
+                _sr_debug_log "INIT" "Debug mode enabled, logging to: $debug_file"
+                _sr_debug_log "DATA_SNAPSHOT" "Initial state when debug mode enabled"
                 echo "Global debug mode enabled. Use 'sr --debug-off' to disable."
+                echo "Debug log file: $debug_file"
                 return;;
             --debug-off)
                 unset _SR_DEBUG
@@ -302,35 +336,45 @@ _sr() {
         if [ "$?" -eq 0 ]; then
             if [ "$target_result" ]; then
                 if [ "$list" ]; then
+                    _sr_debug_log "SEARCH" "List mode: showing matches for query: '$fnd' path_filter: '$path_filter'"
                     return
                 else
                     # Parse result - could be "dir" or "dir|command"
                     local target_dir="${target_result%%|*}"
                     local target_cmd="${target_result#*|}"
                     
+                    _sr_debug_log "JUMP" "Found match - jumping to: '$target_dir' with command: '$target_cmd'"
+                    _sr_debug_log "DATA_SNAPSHOT" "State before jumping"
+                    
                     echo "\033[1;32m==> Jumping to:\033[0m \033[1;36m$target_dir\033[0m"
                     builtin cd "$target_dir"
                     
                     # Execute command if -e option was used and we have a command
                     if [ "$execute_cmd" = "1" ] && [ "$target_cmd" != "$target_dir" ]; then
+                        _sr_debug_log "EXEC_PREP" "Preparing to execute command: '$target_cmd' in directory: '$target_dir'"
                         if [ "$debug_mode" = "1" ]; then
                             echo "\033[1;33m==> Debug mode: Will execute command:\033[0m \033[1;35m$target_cmd\033[0m"
                             echo -n "Do you want to execute this command? [y/N]: "
                             read -r confirm
                             case "$confirm" in
                                 [Yy]|[Yy][Ee][Ss])
+                                    _sr_debug_log "EXEC_CONFIRM" "User confirmed execution of: '$target_cmd'"
                                     echo "\033[1;32m==> Executing:\033[0m \033[1;35m$target_cmd\033[0m"
                                     eval "$target_cmd"
+                                    _sr_debug_log "EXEC_DONE" "Command executed: '$target_cmd' (exit code: $?)"
                                     # Manually increase the weight of the executed command
                                     _sr --add "$target_cmd" "$target_dir"
                                     ;;
                                 *)
+                                    _sr_debug_log "EXEC_CANCEL" "User cancelled execution of: '$target_cmd'"
                                     echo "Command execution cancelled."
                                     ;;
                             esac
                         else
+                            _sr_debug_log "EXEC_AUTO" "Auto-executing command: '$target_cmd'"
                             echo "\033[1;32m==> Executing:\033[0m \033[1;35m$target_cmd\033[0m"
                             eval "$target_cmd"
+                            _sr_debug_log "EXEC_DONE" "Command executed: '$target_cmd' (exit code: $?)"
                             # Manually increase the weight of the executed command
                             _sr --add "$target_cmd" "$target_dir"
                         fi
@@ -338,6 +382,8 @@ _sr() {
                 fi
             fi
         else
+            _sr_debug_log "SEARCH_FAIL" "No matching commands found for query: '$fnd' path_filter: '$path_filter'"
+            _sr_debug_log "DATA_SNAPSHOT" "Current state when search failed"
             echo "No matching commands found." >&2
             return 1
         fi
@@ -434,6 +480,9 @@ if type compctl >/dev/null 2>&1; then
                 done
             fi
             
+            # Log command recording in debug mode
+            _sr_debug_log "CMD_RECORD" "Recording command: '$cmd' in directory: '$dir'"
+            
             # Record the command asynchronously
             (_sr --add "$cmd" "$dir" &)
         }
@@ -444,6 +493,54 @@ if type compctl >/dev/null 2>&1; then
 elif type complete >/dev/null 2>&1; then
     # bash
     [ "$_SR_NO_PROMPT_COMMAND" ] || {
+        _sr_record_command() {
+            # Get the last command from history
+            local cmd="$(history 1 | sed 's/^[ ]*[0-9]*[ ]*//')"
+            local dir="$PWD"
+            
+            # Clean up command: remove newlines and extra spaces
+            cmd="$(echo "$cmd" | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ *//;s/ *$//')"
+            
+            # Skip if command is empty or just whitespace
+            [ -z "$(echo "$cmd" | tr -d ' \t\n')" ] && return
+            
+            # Skip if this is the same as the last recorded command (avoid duplicates)
+            [ "$cmd" = "$_SR_LAST_CMD" ] && return
+            _SR_LAST_CMD="$cmd"
+            
+            # Apply filtering logic before recording
+            case "$cmd" in
+                cd|cd\ *|ls|ls\ *|pwd|clear|exit) return;;
+            esac
+            
+            # Default dangerous commands blacklist
+            local dangerous_commands="rm rmdir mv cp dd chmod chown sudo su killall pkill halt reboot shutdown init mount umount fdisk mkfs fsck sr cd z ls ll"
+            
+            # Check against dangerous commands (only check base command, not parameters)
+            local cmd_base="$(echo "$cmd" | awk '{print $1}')"
+            for dangerous in $dangerous_commands; do
+                [ "$cmd_base" = "$dangerous" ] && return
+            done
+            
+            # Also check if command contains sr command (for compound commands)
+            case "$cmd" in
+                sr\ *|*\ sr\ *|*"&&"\ sr\ *|*"|"\ sr\ *|*";sr"\ *|*";sr"|*"&&sr"\ *|*"|sr"\ *) return;;
+            esac
+            
+            # Check against user-defined ignored commands (only check base command)
+            if [ -n "$_SR_IGNORE_COMMANDS" ]; then
+                for ignore_cmd in $_SR_IGNORE_COMMANDS; do
+                    [ "$cmd_base" = "$ignore_cmd" ] && return
+                done
+            fi
+            
+            # Log command recording in debug mode
+            _sr_debug_log "CMD_RECORD" "Recording command: '$cmd' in directory: '$dir'"
+            
+            # Record the command asynchronously
+            (_sr --add "$cmd" "$dir" &)
+        }
+        
         # Add to PROMPT_COMMAND
         grep "_sr_record_command" <<< "$PROMPT_COMMAND" >/dev/null || {
             PROMPT_COMMAND="$PROMPT_COMMAND"$'\n''_sr_record_command;'
