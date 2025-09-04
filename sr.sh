@@ -200,7 +200,7 @@ _sr() {
                     -h|--help) 
                         echo "sr [-hlrtjpd] [command] [path]" >&2;
                         echo "  -h: show help" >&2;
-                        echo "  -l: list matches" >&2;
+                        echo "  -l: list matches (show directories and commands)" >&2;
                         echo "  -r: rank by frequency" >&2;
                         echo "  -t: rank by recency" >&2;
                         echo "  -j: jump only (don't execute command)" >&2;
@@ -216,7 +216,7 @@ _sr() {
                         echo "  sr --debug-on    # enable global debug mode" >&2;
                         echo "  sr --debug-off   # disable global debug mode" >&2;
                         echo "  sr vim /tmp      # jump to dir under /tmp where vim was used" >&2;
-                        echo "  sr -l git        # list all dirs where git was used" >&2;
+                        echo "  sr -l git        # list all dirs and commands where git was used" >&2;
                         if [ "$_SR_DEBUG" = "1" ]; then
                             echo "" >&2;
                             echo "Global debug mode is currently ENABLED." >&2;
@@ -260,7 +260,7 @@ _sr() {
                     cmd = "sort -nr >&2"
                     for( x in matches ) {
                         if( matches[x] ) {
-                            printf "%-10s %s\n", matches[x], x | cmd
+                            printf "%-10s %s -> %s\n", matches[x], x, (cmd_matches[x] ? cmd_matches[x] : "NO_COMMAND") | cmd
                         }
                     }
                 } else if( print_only ) {

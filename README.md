@@ -42,7 +42,7 @@ sr make
 sr git         # 跳转到目录并执行匹配的命令（默认行为）
 sr -j git      # 只跳转到目录，不执行命令
 sr -p git      # 只打印目录和命令，不跳转也不执行
-sr -l git      # 列出所有匹配项而不跳转
+sr -l git      # 列出所有匹配项（显示目录和对应命令）而不跳转
 sr -r git      # 按频率排序跳转
 sr -t git      # 按时间排序跳转
 sr -d git      # 调试模式：执行前显示命令并等待确认
@@ -155,7 +155,7 @@ cat ~/.sr.debug
    ```bash
    sr git     # 应该跳转到最常用git的目录
    sr npm     # 应该跳转到最常用npm的目录
-   sr -l vim  # 列出所有使用vim的目录
+   sr -l vim  # 列出所有使用vim的目录和对应命令
    ```
 
 4. 测试新功能：
