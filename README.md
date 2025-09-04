@@ -49,6 +49,11 @@ sr -d git      # 调试模式：执行前显示命令并等待确认
 sr --debug-on  # 启用全局调试模式（持久化）
 sr --debug-off # 禁用全局调试模式
 sr -h          # 显示帮助
+
+# 路径过滤功能
+sr git /home/project    # 只在/home/project路径下查找git命令
+sr -l npm /tmp          # 列出/tmp路径下所有npm命令
+sr vim /home/alex       # 跳转到/home/alex下最常用vim的目录
 ```
 
 ## 配置选项
@@ -83,6 +88,35 @@ export _SR_NO_PROMPT_COMMAND=1
 1. **记录阶段**: 每次执行命令后，sr会记录命令内容和当前目录
 2. **匹配阶段**: 使用frecent算法计算每个目录的分数（频率×时间衰减）
 3. **跳转阶段**: 自动cd到分数最高的目录
+
+## 路径过滤功能
+
+当您在多个目录中执行相同命令时，可以使用路径过滤来精确定位：
+
+### 语法
+```bash
+sr [选项] <命令> <路径前缀>
+```
+
+### 使用场景
+- **多项目开发**: 当您在多个项目目录中都使用git时，可以指定特定项目路径
+- **目录限制**: 只在特定路径下查找命令历史
+- **精确匹配**: 避免跳转到不相关的目录
+
+### 示例
+```bash
+# 问题：git diff在很多目录都执行过，但想跳转到特定项目
+sr git diff                    # 可能跳转到任意一个git目录
+sr git diff /home/alex/project # 只在/home/alex/project下查找
+
+# 列出特定路径下的所有匹配项
+sr -l npm /home/alex/work      # 只显示/home/alex/work下的npm命令
+sr -l docker /opt              # 只显示/opt下的docker命令
+
+# 其他选项组合
+sr -j vim /tmp                 # 只跳转，不执行，限制在/tmp路径
+sr -p git /home/projects       # 只打印，限制在/home/projects路径
+```
 
 ## 数据格式
 
