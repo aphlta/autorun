@@ -285,7 +285,7 @@ _sr() {
         [ -f "$datafile" ] || return
         
         local target_result
-        target_result="$( < <( _sr_entries ) \awk -v t="$(\date +%s)" -v list="$list" -v typ="$typ" -v q="$fnd" -v path_filter="$path_filter" -v execute_cmd="$execute_cmd" -v debug_mode="$debug_mode" -v print_only="$print_only" -F"|" '
+        target_result="$( < <( _sr_entries ) awk -v t="$(date +%s)" -v list="$list" -v typ="$typ" -v q="$fnd" -v path_filter="$path_filter" -v execute_cmd="$execute_cmd" -v debug_mode="$debug_mode" -v print_only="$print_only" -F"|" '
             function frecent(rank, time) {
                 # relate frequency and time
                 dx = t - time
@@ -313,13 +313,103 @@ _sr() {
                     }
                 }
             }
+            function min(a, b, c) {
+                result = a
+                if (b < result) result = b
+                if (c < result) result = c
+                return result
+            }
+            
+            function levenshtein(s1, s2) {
+                n = length(s1); m = length(s2)
+                if (n == 0) return m
+                if (m == 0) return n
+                
+                # Initialize distance matrix
+                for (i = 0; i <= n; i++) d[i,0] = i
+                for (j = 0; j <= m; j++) d[0,j] = j
+                
+                # Calculate distances
+                for (i = 1; i <= n; i++) {
+                    for (j = 1; j <= m; j++) {
+                        cost = (substr(s1,i,1) == substr(s2,j,1)) ? 0 : 1
+                        d[i,j] = min(d[i-1,j]+1, d[i,j-1]+1, d[i-1,j-1]+cost)
+                    }
+                }
+                return d[n,m]
+            }
+            
+            function enhanced_match(cmd, query) {
+                cmd_lower = tolower(cmd)
+                query_lower = tolower(query)
+                
+                # Get fuzzy level from environment (default 3)
+                fuzzy_level = (ENVIRON["_SR_FUZZY_LEVEL"] ? ENVIRON["_SR_FUZZY_LEVEL"] : 3)
+                
+                # 1. Exact match (highest priority)
+                if (cmd == query || cmd_lower == query_lower) return 2.0
+                
+                # 2. Exact substring match
+                if (index(cmd, query) > 0) return 1.9
+                
+                # 3. Case-insensitive substring match
+                if (index(cmd_lower, query_lower) > 0) return 1.8
+                
+                # 4. Prefix match
+                if (index(cmd_lower, query_lower) == 1) return 1.7
+                
+                # 5. Word boundary match
+                if (match(cmd_lower, "(^|[^a-z])" query_lower "([^a-z]|$)")) return 1.6
+                
+                # 6. Fuzzy matching based on level
+                if (fuzzy_level >= 2) {
+                    # Edit distance matching
+                    dist = levenshtein(cmd_lower, query_lower)
+                    max_dist = int(length(query_lower) * 0.3)  # 30% tolerance
+                    
+                    if (dist <= 1) return 1.4
+                    if (dist <= 2) return 1.2
+                    if (dist <= max_dist && max_dist > 2) return 1.0
+                }
+                
+                if (fuzzy_level >= 3) {
+                    # Subsequence matching (characters in order but not consecutive)
+                    if (is_subsequence(query_lower, cmd_lower)) return 0.8
+                    
+                    # First letter + length similarity
+                    if (substr(cmd_lower, 1, 1) == substr(query_lower, 1, 1)) {
+                        len_diff = abs(length(cmd_lower) - length(query_lower))
+                        if (len_diff <= 3) return 0.6
+                    }
+                }
+                
+                return 0  # No match
+            }
+            
+            function is_subsequence(needle, haystack) {
+                ni = 1; hi = 1
+                while (ni <= length(needle) && hi <= length(haystack)) {
+                    if (substr(needle, ni, 1) == substr(haystack, hi, 1)) {
+                        ni++
+                    }
+                    hi++
+                }
+                return ni > length(needle)
+            }
+            
+            function abs(x) {
+                return x < 0 ? -x : x
+            }
+            
             BEGIN {
-                # Store original query for exact matching
-                q_exact = q
                 # Create fuzzy pattern for fallback
                 q_fuzzy = q
                 gsub(" ", ".*", q_fuzzy)
-                hi_rank = ihi_rank = -9999999999
+                hi_rank = -9999999999
+                
+                # Initialize fuzzy matching settings
+                fuzzy_level = (ENVIRON["_SR_FUZZY_LEVEL"] ? ENVIRON["_SR_FUZZY_LEVEL"] : 3)
+                min_match_score = (ENVIRON["_SR_MIN_MATCH_SCORE"] ? ENVIRON["_SR_MIN_MATCH_SCORE"] : 0.5)
             }
             NF >= 4 {
                 dir = $1
@@ -344,18 +434,26 @@ _sr() {
                     next
                 }
                 
-                # Smart matching: exact match first, then fuzzy match
+                # Enhanced fuzzy matching
                 if( q == "" ) {
                     cmd_match = 1
+                    match_score = 1.0
                 } else {
-                    # Try exact match first (higher priority)
-                    if( cmd == q_exact || index(cmd, q_exact) > 0 ) {
+                    match_score = enhanced_match(cmd, q)
+                    if( match_score >= min_match_score ) {
                         cmd_match = 1
-                        rank = rank * 1.5  # Boost exact matches
-                    }
-                    # If no exact match, try fuzzy match
-                    else if( cmd ~ q_fuzzy ) {
-                        cmd_match = 1
+                        rank = rank * match_score  # Apply match score multiplier
+                    } else {
+                        # Fallback to old fuzzy matching for backward compatibility
+                        if( cmd ~ q_fuzzy ) {
+                            cmd_match = 1
+                            match_score = 0.5
+                            rank = rank * match_score
+                        } else if( tolower(cmd) ~ tolower(q) ) {
+                            cmd_match = 1
+                            match_score = 0.3
+                            rank = rank * match_score
+                        }
                     }
                 }
                 
@@ -363,34 +461,21 @@ _sr() {
                     if( !matches[dir] || matches[dir] < rank ) {
                         matches[dir] = rank
                         cmd_matches[dir] = cmd
-                    }
-                } else if( tolower(cmd) ~ tolower(q) ) {
-                    cmd_match = 1
-                    if( !imatches[dir] || imatches[dir] < rank ) {
-                        imatches[dir] = rank
-                        icmd_matches[dir] = cmd
+                        match_scores[dir] = match_score
                     }
                 }
                 
                 if( cmd_match ) {
-                    if( matches[dir] && matches[dir] > hi_rank ) {
+                    if( matches[dir] > hi_rank ) {
                         best_match = dir
                         best_cmd = cmd_matches[dir]
                         hi_rank = matches[dir]
-                    } else if( imatches[dir] && imatches[dir] > ihi_rank ) {
-                        ibest_match = dir
-                        ibest_cmd = icmd_matches[dir]
-                        ihi_rank = imatches[dir]
                     }
                 }
             }
             END {
-                # prefer case sensitive
                 if( best_match ) {
                     output(matches, best_match, cmd_matches, best_cmd)
-                    exit
-                } else if( ibest_match ) {
-                    output(imatches, ibest_match, icmd_matches, ibest_cmd)
                     exit
                 }
                 exit(1)
