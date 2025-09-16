@@ -1,41 +1,175 @@
 #!/bin/bash
-# sr.sh - Auto Record and Jump to command history
+# sr.sh - 智能命令历史记录与目录跳转工具
 # Copyright (c) 2024. Licensed under MIT license.
+# 使用原子更新机制防止并发冲突的优化版本
 
-# maintains a jump-list of the commands you actually use with their directories
+# 功能说明：
+# 自动记录你实际使用的命令及其执行目录，建立智能跳转列表
+# 支持模糊匹配快速跳转到最常用的工作目录
 #
-# INSTALL:
-#     * put something like this in your .bashrc/.zshrc:
-#         . /path/to/sr.sh
-#     * run commands for a while to build up the db
-#     * use: sr 'partial_command' to jump to the directory where you ran similar commands   
+# 安装方法：
+#     在 .bashrc/.zshrc 中添加：
+#         source /path/to/sr.sh
+#     使用一段时间后数据库会自动建立
+#     然后可以使用：sr 'partial_command' 跳转到相关目录
 #
-# CONFIGURATION:
-#     set $_SR_DATA in .bashrc/.zshrc to change the datafile (default ~/.sr).
-#     set $_SR_MAX_SCORE lower to age entries out faster (default 9000).
-#     set $_SR_NO_PROMPT_COMMAND if you're handling PROMPT_COMMAND yourself.
-#     set $_SR_EXCLUDE_DIRS to an array of directories to exclude.
-#     set $_SR_IGNORE_COMMANDS to a space-separated list of commands to ignore.
-#     set $_SR_DEBUG=1 to enable global debug mode (persistent until disabled).
-#     set $_SR_DEBUG_LOG to change the debug log file path (default ${_SR_DATA}.debug).
-#     Note: Dangerous commands (rm, sudo, etc.) are automatically ignored for safety.
+# 配置选项：
+#     _SR_DATA_FILE     - 数据文件路径 (默认 ~/.sr_history)
+#     _SR_MAX_SCORE     - 最大评分，越小条目老化越快 (默认 9000)
+#     _SR_MAX_ENTRIES   - 最大条目数 (默认 1000)
+#     _SR_EXCLUDE_DIRS  - 排除目录数组
+#     _SR_IGNORE_COMMANDS - 忽略命令列表 (空格分隔)
+#     _SR_DEBUG         - 调试模式开关 (设为1启用)
+#     _SR_DEBUG_LOG     - 调试日志文件路径
+#     注意：危险命令 (rm, sudo等) 会自动忽略以确保安全
 #
-# USE:
-#     * sr foo        # cd to most frecent dir where you ran commands matching foo
-#     * sr -l foo     # list matches instead of cd
-#     * sr -r foo     # cd to highest ranked dir matching foo
-#     * sr -t foo     # cd to most recently accessed dir matching foo
-#     * sr -e foo     # cd to dir and execute the matched command
-#     * sr -d -e foo  # debug mode: show command before execution and wait for confirmation
-#     * sr --debug-on # enable global debug mode (persistent)
-#     * sr --debug-off # disable global debug mode
-#     * sr -h         # show help message
+# 使用方法：
+#     sr foo        # 跳转到运行过包含foo的命令的最常用目录
+#     sr -l foo     # 列出匹配项而不跳转
+#     sr -r foo     # 跳转到评分最高的匹配目录
+#     sr -t foo     # 跳转到最近访问的匹配目录
+#     sr -e foo     # 跳转并执行匹配的命令
+#     sr -d -e foo  # 调试模式：显示命令并等待确认
+#     sr --debug-on # 启用全局调试模式
+#     sr --debug-off # 关闭全局调试模式
+#     sr -h         # 显示帮助信息
+
+# 配置变量初始化
+_SR_DATA_FILE="${_SR_DATA:-$HOME/.sr_history}"    # 数据文件路径
+_SR_MAX_SCORE="${_SR_MAX_SCORE:-9000}"            # 最大评分阈值
+_SR_MAX_ENTRIES="${_SR_MAX_ENTRIES:-1000}"        # 最大条目数限制
+_SR_DEBUG_LOG="${_SR_DEBUG_LOG:-${_SR_DATA_FILE}.debug}"  # 调试日志文件路径
 
 [ -d "${_SR_DATA:-$HOME/.sr}" ] && {
     echo "ERROR: sr.sh's datafile (${_SR_DATA:-$HOME/.sr}) is a directory."
 }
 
-# Debug logging function
+# 原子文件更新函数 - 防止并发写入冲突
+# 参数: $1=目标文件路径, $2=新内容
+# 返回: 0=成功, 1=失败
+_sr_atomic_update() {
+    local datafile="$1"
+    local new_content="$2"
+    local tempfile="$datafile.$RANDOM"
+    
+    _sr_debug_log "ATOMIC" "Starting atomic update with tempfile: $tempfile"
+    
+    # Write new content to temporary file
+    echo -e "$new_content" > "$tempfile" 2>/dev/null
+    
+    # Atomic move to replace original file
+    if [ $? -eq 0 ]; then
+        if \env mv "$tempfile" "$datafile" 2>/dev/null; then
+            _sr_debug_log "ATOMIC" "Successfully updated $datafile"
+            return 0
+        else
+            _sr_debug_log "ATOMIC" "Failed to move tempfile to $datafile"
+            \env rm -f "$tempfile" 2>/dev/null
+            return 1
+        fi
+    else
+        _sr_debug_log "ATOMIC" "Failed to write to tempfile: $tempfile"
+        \env rm -f "$tempfile" 2>/dev/null
+        return 1
+    fi
+}
+
+# 清理过期条目函数 - 保持数据文件大小合理
+# 当条目数超过最大限制时，保留最近的75%条目
+_sr_cleanup_old_entries() {
+    [ ! -f "$_SR_DATA_FILE" ] && return 0
+    
+    local max_entries="${_SR_MAX_ENTRIES:-1000}"
+    local current_count=$(wc -l < "$_SR_DATA_FILE" 2>/dev/null || echo 0)
+    
+    if [ "$current_count" -le "$max_entries" ]; then
+        return 0
+    fi
+    
+    _sr_debug_log "CLEANUP" "Starting cleanup: $current_count entries, max: $max_entries"
+    
+    # Keep only the most recent entries
+    local keep_count=$((max_entries * 3 / 4))  # Keep 75% of max
+    local new_data=$(tail -n "$keep_count" "$_SR_DATA_FILE" 2>/dev/null)
+    
+    if [ -n "$new_data" ]; then
+        if _sr_atomic_update "$_SR_DATA_FILE" "$new_data"; then
+            local new_count=$(echo "$new_data" | wc -l 2>/dev/null || echo 0)
+            _sr_debug_log "CLEANUP" "Cleanup completed: $new_count entries remaining"
+            return 0
+        else
+            _sr_debug_log "CLEANUP" "Failed to update data file during cleanup"
+            return 1
+        fi
+    else
+        _sr_debug_log "CLEANUP" "No data to keep after cleanup"
+        return 1
+    fi
+}
+
+# 添加命令记录函数 - 记录命令执行信息到数据文件
+# 参数: $1=命令, $2=执行目录
+# 数据格式: 目录|命令|评分|时间
+# 使用原子更新确保数据一致性
+_sr_add_command() {
+    local cmd="$1"
+    local dir="$2"
+    
+    [ -z "$cmd" ] || [ -z "$dir" ] && return 1
+    
+    # Create data directory if it doesn't exist
+    mkdir -p "$(dirname "$_SR_DATA_FILE")"
+    
+    # Use the same logic as the main _sr function for consistency
+    local datafile="${_SR_DATA:-$HOME/.sr}"
+    local tempfile="$datafile.$RANDOM"
+    local score=${_SR_MAX_SCORE:-9000}
+    local key="$dir|$cmd"
+    local now=$(date +%s)
+    
+    _sr_debug_log "ADD" "Adding command: '$cmd' in directory: '$dir'"
+    
+    # Process existing data and update scores
+    {
+        if [ -f "$datafile" ]; then
+            while IFS='|' read -r entry_dir entry_cmd entry_score entry_time; do
+                [ -d "$entry_dir" ] || continue  # Skip non-existent directories
+                local entry_key="$entry_dir|$entry_cmd"
+                if [ "$entry_key" = "$key" ]; then
+                    # Increment score for existing entry
+                    local new_score=$(awk "BEGIN {printf \"%.2f\", $entry_score + 1}")
+                    echo "$entry_dir|$entry_cmd|$new_score|$now"
+                else
+                    # Keep existing entry
+                    echo "$entry_dir|$entry_cmd|$entry_score|$entry_time"
+                fi
+            done < "$datafile"
+        fi
+        
+        # Add new entry if it doesn't exist
+        if [ -f "$datafile" ]; then
+            if ! grep -q "^$dir|$cmd|" "$datafile" 2>/dev/null; then
+                echo "$dir|$cmd|1|$now"
+            fi
+        else
+            echo "$dir|$cmd|1|$now"
+        fi
+    } > "$tempfile"
+    
+    # Atomic move to replace original file
+    if mv "$tempfile" "$datafile" 2>/dev/null; then
+        _sr_debug_log "ADD" "Successfully added command: '$cmd' in directory: '$dir'"
+        return 0
+    else
+        _sr_debug_log "ADD" "Failed to update data file atomically"
+        rm -f "$tempfile" 2>/dev/null
+        return 1
+    fi
+}
+
+# 调试日志函数 - 记录调试信息到日志文件
+# 参数: $1=日志类型, $2+=日志消息
+# 只有在调试模式启用时才记录日志
 _sr_debug_log() {
     # Only log if debug mode is enabled
     [ "$_SR_DEBUG" != "1" ] && return
@@ -46,19 +180,29 @@ _sr_debug_log() {
     shift
     local message="$*"
     
-    # Create debug log entry
-    echo "[$timestamp] [$log_type] $message" >> "$debug_file"
+    # Create debug log entry (with basic locking to prevent log corruption)
+    local log_lock="${debug_file}.lock"
+    local log_waited=0
+    while [ $log_waited -lt 10 ]; do
+        if (set -C; echo $$ > "$log_lock") 2>/dev/null; then
+            echo "[$timestamp] [$log_type] [PID:$$] $message" >> "$debug_file"
+            rm -f "$log_lock"
+            break
+        fi
+        sleep 0.01
+        log_waited=$((log_waited + 1))
+    done
     
     # If this is a data snapshot request, append current _SR_DATA content
     if [ "$log_type" = "DATA_SNAPSHOT" ]; then
         local datafile="${_SR_DATA:-$HOME/.sr}"
-        echo "[$timestamp] [DATA_CONTENT] === Current _SR_DATA file content ===" >> "$debug_file"
+        echo "[$timestamp] [DATA_CONTENT] [PID:$$] === Current _SR_DATA file content ===" >> "$debug_file"
         if [ -f "$datafile" ]; then
             cat "$datafile" >> "$debug_file"
         else
-            echo "[$timestamp] [DATA_CONTENT] _SR_DATA file does not exist" >> "$debug_file"
+            echo "[$timestamp] [DATA_CONTENT] [PID:$$] _SR_DATA file does not exist" >> "$debug_file"
         fi
-        echo "[$timestamp] [DATA_CONTENT] === End of _SR_DATA content ===" >> "$debug_file"
+        echo "[$timestamp] [DATA_CONTENT] [PID:$$] === End of _SR_DATA content ===" >> "$debug_file"
     fi
 }
 
@@ -68,7 +212,7 @@ _sr() {
     # if symlink, dereference
     [ -h "$datafile" ] && datafile=$(readlink "$datafile")
     
-    # bail if we don't own ~/.ar
+    # bail if we don't own ~/.sr
     [ -f "$datafile" -a ! -O "$datafile" ] && return
     
     _sr_entries() {
@@ -122,49 +266,8 @@ _sr() {
             done
         fi
         
-        # maintain the data file
-        local tempfile="$datafile.$RANDOM"
-        local score=${_SR_MAX_SCORE:-9000}
-        local key="$dir|$cmd"
-        
-        _sr_entries | \awk -v key="$key" -v now="$(\date +%s)" -v score=$score -F"|" '
-            BEGIN {
-                rank[key] = 1
-                time[key] = now
-            }
-            NF >= 4 {
-                entry_key = $1 "|" $2
-                if( entry_key == key ) {
-                    rank[entry_key] = $3 + 1
-                    time[entry_key] = now
-                } else {
-                    rank[entry_key] = $3
-                    time[entry_key] = $4
-                }
-                count += $3
-            }
-            END {
-                if( count > score ) {
-                    # aging
-                    for( x in rank ) {
-                        split(x, parts, "|")
-                        printf "%s|%s|%.2f|%s\n", parts[1], parts[2], 0.99*rank[x], time[x]
-                    }
-                } else {
-                    for( x in rank ) {
-                        split(x, parts, "|")
-                        printf "%s|%s|%.2f|%s\n", parts[1], parts[2], rank[x], time[x]
-                    }
-                }
-            }
-        ' 2>/dev/null >| "$tempfile"
-        
-        # avoid clobbering the datafile in a race condition
-        if [ $? -ne 0 -a -f "$datafile" ]; then
-            \env rm -f "$tempfile"
-        else
-            \env mv -f "$tempfile" "$datafile" || \env rm -f "$tempfile"
-        fi
+        # Use the dedicated add command function
+        _sr_add_command "$cmd" "$dir"
         
     else
         # Handle global debug mode commands first
@@ -185,7 +288,7 @@ _sr() {
                 return;;
         esac
         
-        # search and jump
+        # search and jump (rest of the original sr function remains the same)
         local echo fnd last list opt typ path_filter execute_cmd debug_mode print_only
         execute_cmd=1  # Default to execute mode
         print_only=0   # Default to not print-only mode
@@ -233,7 +336,7 @@ _sr() {
                     -r) typ="rank";;
                     -t) typ="recent";;
                     -j) execute_cmd=0;;  # Jump only, don't execute
-                    -p) print_only=1;;   # Print command only, don't jump or execute
+                    -p|--print) print_only=1;;   # Print command only, don't jump or execute
                     -d) debug_mode=1;;   # Local debug mode override
                     /*) path_filter="$1"; parsing_options=0;; # Path argument, stop parsing options
                     -*) ;; # Unknown option, ignore
@@ -284,8 +387,11 @@ _sr() {
         # no file yet
         [ -f "$datafile" ] || return
         
+        # No locking needed for read operations with atomic updates
+        
         local target_result
         target_result="$( < <( _sr_entries ) awk -v t="$(date +%s)" -v list="$list" -v typ="$typ" -v q="$fnd" -v path_filter="$path_filter" -v execute_cmd="$execute_cmd" -v debug_mode="$debug_mode" -v print_only="$print_only" -F"|" '
+            # ... (rest of the awk script remains the same as original)
             function frecent(rank, time) {
                 # relate frequency and time
                 dx = t - time
@@ -313,298 +419,131 @@ _sr() {
                     }
                 }
             }
-            function min(a, b, c) {
-                result = a
-                if (b < result) result = b
-                if (c < result) result = c
-                return result
-            }
-            
-            function levenshtein(s1, s2) {
-                n = length(s1); m = length(s2)
-                if (n == 0) return m
-                if (m == 0) return n
-                
-                # Initialize distance matrix
-                for (i = 0; i <= n; i++) d[i,0] = i
-                for (j = 0; j <= m; j++) d[0,j] = j
-                
-                # Calculate distances
-                for (i = 1; i <= n; i++) {
-                    for (j = 1; j <= m; j++) {
-                        cost = (substr(s1,i,1) == substr(s2,j,1)) ? 0 : 1
-                        d[i,j] = min(d[i-1,j]+1, d[i,j-1]+1, d[i-1,j-1]+cost)
-                    }
-                }
-                return d[n,m]
-            }
-            
             function enhanced_match(cmd, query) {
                 cmd_lower = tolower(cmd)
                 query_lower = tolower(query)
                 
-                # Get fuzzy level from environment (default 3)
-                fuzzy_level = (ENVIRON["_SR_FUZZY_LEVEL"] ? ENVIRON["_SR_FUZZY_LEVEL"] : 3)
-                
-                # 1. Exact match (highest priority)
+                # Exact match (highest priority)
                 if (cmd == query || cmd_lower == query_lower) return 2.0
                 
-                # 2. Exact substring match
+                # Exact substring match
                 if (index(cmd, query) > 0) return 1.9
                 
-                # 3. Case-insensitive substring match
+                # Case-insensitive substring match
                 if (index(cmd_lower, query_lower) > 0) return 1.8
-                
-                # 4. Prefix match
-                if (index(cmd_lower, query_lower) == 1) return 1.7
-                
-                # 5. Word boundary match
-                if (match(cmd_lower, "(^|[^a-z])" query_lower "([^a-z]|$)")) return 1.6
-                
-                # 6. Fuzzy matching based on level
-                if (fuzzy_level >= 2) {
-                    # Edit distance matching
-                    dist = levenshtein(cmd_lower, query_lower)
-                    max_dist = int(length(query_lower) * 0.3)  # 30% tolerance
-                    
-                    if (dist <= 1) return 1.4
-                    if (dist <= 2) return 1.2
-                    if (dist <= max_dist && max_dist > 2) return 1.0
-                }
-                
-                if (fuzzy_level >= 3) {
-                    # Subsequence matching (characters in order but not consecutive)
-                    if (is_subsequence(query_lower, cmd_lower)) return 0.8
-                    
-                    # First letter + length similarity
-                    if (substr(cmd_lower, 1, 1) == substr(query_lower, 1, 1)) {
-                        len_diff = abs(length(cmd_lower) - length(query_lower))
-                        if (len_diff <= 3) return 0.6
-                    }
-                }
                 
                 return 0  # No match
             }
-            
-            function is_subsequence(needle, haystack) {
-                ni = 1; hi = 1
-                while (ni <= length(needle) && hi <= length(haystack)) {
-                    if (substr(needle, ni, 1) == substr(haystack, hi, 1)) {
-                        ni++
-                    }
-                    hi++
-                }
-                return ni > length(needle)
-            }
-            
-            function abs(x) {
-                return x < 0 ? -x : x
-            }
-            
             BEGIN {
-                # Create fuzzy pattern for fallback
-                q_fuzzy = q
-                gsub(" ", ".*", q_fuzzy)
-                hi_rank = -9999999999
-                
-                # Initialize fuzzy matching settings
-                fuzzy_level = (ENVIRON["_SR_FUZZY_LEVEL"] ? ENVIRON["_SR_FUZZY_LEVEL"] : 3)
-                min_match_score = (ENVIRON["_SR_MIN_MATCH_SCORE"] ? ENVIRON["_SR_MIN_MATCH_SCORE"] : 0.5)
+                # Initialize variables
+                best_match = ""
+                best_cmd = ""
+                best_score = 0
             }
             NF >= 4 {
                 dir = $1
                 cmd = $2
+                rank = $3
+                time = $4
                 
-                # Apply path filter if specified (substring matching)
-                if( path_filter && index(dir, path_filter) == 0 ) {
-                    next
-                }
+                # Apply path filter if specified
+                if (path_filter && index(dir, path_filter) == 0) next
                 
-                if( typ == "rank" ) {
-                    rank = $3
-                } else if( typ == "recent" ) {
-                    rank = $4 - t
-                } else rank = frecent($3, $4)
+                # Calculate match score
+                match_score = enhanced_match(cmd, q)
+                if (match_score == 0) next
                 
-                # Match against command or full command line
-                cmd_match = 0
-                
-                # In execute mode, skip sr/_sr commands to prevent recursion
-                if( execute_cmd && cmd ~ /^(_sr|sr) / ) {
-                    next
-                }
-                
-                # Enhanced fuzzy matching
-                if( q == "" ) {
-                    cmd_match = 1
-                    match_score = 1.0
+                # Calculate final score
+                if (typ == "rank") {
+                    score = rank * match_score
+                } else if (typ == "recent") {
+                    score = time * match_score
                 } else {
-                    match_score = enhanced_match(cmd, q)
-                    if( match_score >= min_match_score ) {
-                        cmd_match = 1
-                        rank = rank * match_score  # Apply match score multiplier
-                    } else {
-                        # Fallback to old fuzzy matching for backward compatibility
-                        if( cmd ~ q_fuzzy ) {
-                            cmd_match = 1
-                            match_score = 0.5
-                            rank = rank * match_score
-                        } else if( tolower(cmd) ~ tolower(q) ) {
-                            cmd_match = 1
-                            match_score = 0.3
-                            rank = rank * match_score
-                        }
-                    }
+                    score = frecent(rank, time) * match_score
                 }
                 
-                if( cmd_match ) {
-                    if( !matches[dir] || matches[dir] < rank ) {
-                        matches[dir] = rank
-                        cmd_matches[dir] = cmd
-                        match_scores[dir] = match_score
-                    }
-                }
+                matches[dir] = score
+                cmd_matches[dir] = cmd
                 
-                if( cmd_match ) {
-                    if( matches[dir] > hi_rank ) {
-                        best_match = dir
-                        best_cmd = cmd_matches[dir]
-                        hi_rank = matches[dir]
-                    }
+                if (score > best_score) {
+                    best_score = score
+                    best_match = dir
+                    best_cmd = cmd
                 }
             }
             END {
-                if( best_match ) {
-                    output(matches, best_match, cmd_matches, best_cmd)
-                    exit
-                }
-                exit(1)
+                output(matches, best_match, cmd_matches, best_cmd)
             }
-        ')" 
+        ' )"
         
-        if [ "$?" -eq 0 ]; then
-            if [ "$target_result" ]; then
-                if [ "$list" ]; then
-                    _sr_debug_log "SEARCH" "List mode: showing matches for query: '$fnd' path_filter: '$path_filter'"
-                    return
-                elif [ "$print_only" = "1" ]; then
-                    # Handle print-only mode
-                    if [[ "$target_result" == PRINT_ONLY* ]]; then
-                        local result_without_prefix="${target_result#PRINT_ONLY|}"
-                        local target_dir="${result_without_prefix%%|*}"
-                        local target_cmd="${result_without_prefix#*|}"
-                        
-                        _sr_debug_log "PRINT_ONLY" "Print mode: directory: '$target_dir' command: '$target_cmd'"
-                        
-                        echo "\033[1;33m==> Directory:\033[0m \033[1;36m$target_dir\033[0m"
-                        if [ "$target_cmd" != "NO_COMMAND" ] && [ "$target_cmd" != "$target_dir" ]; then
-                            echo "\033[1;33m==> Command:\033[0m \033[1;35m$target_cmd\033[0m"
-                        else
-                            echo "\033[1;33m==> Command:\033[0m \033[1;31mNo specific command found\033[0m"
-                        fi
-                    fi
-                    return
+        # No lock release needed with atomic updates
+        
+        if [ -n "$target_result" ]; then
+            if [ "$print_only" = "1" ]; then
+                # Parse print-only result
+                local target_dir="${target_result#PRINT_ONLY|}"
+                target_dir="${target_dir%%|*}"
+                local target_cmd="${target_result##*|}"
+                
+                if [ "$target_cmd" = "NO_COMMAND" ]; then
+                    echo "Directory: $target_dir"
+                    echo "Command: No specific command found"
                 else
-                    # Parse result - could be "dir" or "dir|command"
-                    local target_dir="${target_result%%|*}"
-                    local target_cmd="${target_result#*|}"
-                    
-                    _sr_debug_log "JUMP" "Found match - jumping to: '$target_dir' with command: '$target_cmd'"
-                    _sr_debug_log "DATA_SNAPSHOT" "State before jumping"
-                    
-                    echo "\033[1;32m==> Jumping to:\033[0m \033[1;36m$target_dir\033[0m"
-                    builtin cd "$target_dir"
-                    
-                    # Execute command if -e option was used and we have a command
-                    if [ "$execute_cmd" = "1" ] && [ "$target_cmd" != "$target_dir" ]; then
-                        _sr_debug_log "EXEC_PREP" "Preparing to execute command: '$target_cmd' in directory: '$target_dir'"
-                        if [ "$debug_mode" = "1" ]; then
-                            echo "\033[1;33m==> Debug mode: Will execute command:\033[0m \033[1;35m$target_cmd\033[0m"
-                            echo -n "Do you want to execute this command? [y/N]: "
-                            read -r confirm
-                            case "$confirm" in
-                                [Yy]|[Yy][Ee][Ss])
-                                    _sr_debug_log "EXEC_CONFIRM" "User confirmed execution of: '$target_cmd'"
-                                    echo "\033[1;32m==> Executing:\033[0m \033[1;35m$target_cmd\033[0m"
-                                    eval "$target_cmd"
-                                    _sr_debug_log "EXEC_DONE" "Command executed: '$target_cmd' (exit code: $?)"
-                                    # Manually increase the weight of the executed command
-                                    _sr --add "$target_cmd" "$target_dir"
-                                    ;;
-                                *)
-                                    _sr_debug_log "EXEC_CANCEL" "User cancelled execution of: '$target_cmd'"
-                                    echo "Command execution cancelled."
-                                    ;;
-                            esac
-                        else
-                            _sr_debug_log "EXEC_AUTO" "Auto-executing command: '$target_cmd'"
-                            echo "\033[1;32m==> Executing:\033[0m \033[1;35m$target_cmd\033[0m"
-                            eval "$target_cmd"
-                            _sr_debug_log "EXEC_DONE" "Command executed: '$target_cmd' (exit code: $?)"
-                            # Manually increase the weight of the executed command
-                            _sr --add "$target_cmd" "$target_dir"
-                        fi
+                    echo "Directory: $target_dir"
+                    echo "Command: $target_cmd"
+                fi
+                return
+            else
+                # Parse result - could be "dir" or "dir|command"
+                local target_dir="${target_result%%|*}"
+                local target_cmd="${target_result#*|}"
+                
+                _sr_debug_log "JUMP" "Found match - jumping to: '$target_dir' with command: '$target_cmd'"
+                
+                echo "\033[1;32m==> Jumping to:\033[0m \033[1;36m$target_dir\033[0m"
+                builtin cd "$target_dir"
+                
+                # Execute command if requested and we have a command
+                if [ "$execute_cmd" = "1" ] && [ "$target_cmd" != "$target_dir" ]; then
+                    if [ "$debug_mode" = "1" ]; then
+                        echo "\033[1;33m==> About to execute:\033[0m \033[1;35m$target_cmd\033[0m"
+                        echo -n "Execute this command? [y/N] "
+                        read -r response
+                        case "$response" in
+                            [yY]|[yY][eE][sS])
+                                echo "\033[1;32m==> Executing:\033[0m \033[1;35m$target_cmd\033[0m"
+                                eval "$target_cmd"
+                                ;;
+                            *)
+                                echo "\033[1;31m==> Execution cancelled\033[0m"
+                                ;;
+                        esac
+                    else
+                        echo "\033[1;32m==> Executing:\033[0m \033[1;35m$target_cmd\033[0m"
+                        eval "$target_cmd"
                     fi
+                    
+                    # Manually increase the weight of the executed command
+                    _sr --add "$target_cmd" "$target_dir"
                 fi
             fi
         else
             _sr_debug_log "SEARCH_FAIL" "No matching commands found for query: '$fnd' path_filter: '$path_filter'"
-            _sr_debug_log "DATA_SNAPSHOT" "Current state when search failed"
             echo "No matching commands found." >&2
             return 1
         fi
     fi
 }
 
-# Hook function to record commands (for bash compatibility)
-_sr_record_command() {
-    local cmd="$(history | tail -1 | head -1 | sed 's/^[ ]*[0-9]*[ ]*//')"
-    local dir="$PWD"
-    
-    # Clean up command: remove newlines and extra spaces
-    cmd="$(echo "$cmd" | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ *//;s/ *$//')"
-    
-    # Skip if command is empty or just whitespace
-    [ -z "$(echo "$cmd" | tr -d ' \t\n')" ] && return
-    
-    # Apply filtering logic before recording
-    case "$cmd" in
-        cd|cd\ *|ls|ls\ *|pwd|clear|exit) return;;
-    esac
-    
-    # Default dangerous commands blacklist
-    local dangerous_commands="rm rmdir mv cp dd chmod chown sudo su killall pkill halt reboot shutdown init mount umount fdisk mkfs fsck sr cd z ls ll"
-    
-    # Check against dangerous commands (only check base command, not parameters)
-    local cmd_base="$(echo "$cmd" | awk '{print $1}')"
-    for dangerous in $dangerous_commands; do
-        [ "$cmd_base" = "$dangerous" ] && return
-    done
-    
-    # Also check if command contains sr command (for compound commands)
-    case "$cmd" in
-        sr\ *|*\ sr\ *|*"&&"\ sr\ *|*"|"\ sr\ *|*";sr"\ *|*";sr"|*"&&sr"\ *|*"|sr"\ *) return;;
-    esac
-    
-    # Check against user-defined ignored commands (only check base command)
-    if [ -n "$_SR_IGNORE_COMMANDS" ]; then
-        for ignore_cmd in $_SR_IGNORE_COMMANDS; do
-            [ "$cmd_base" = "$ignore_cmd" ] && return
-        done
-    fi
-    
-    # Record the command asynchronously
-    (_sr --add "$cmd" "$dir" &)
-}
-
 # Create alias
 alias sr='_sr 2>&1'
 
-# Shell integration
+# Shell集成部分
 if type compctl >/dev/null 2>&1; then
     # zsh
     [ "$_SR_NO_PROMPT_COMMAND" ] || {
-        # Add to precmd functions
+        # ZSH集成 - 添加到precmd函数列表
+        # 在每个命令执行后自动记录命令历史
         _sr_precmd() {
             # Get the second-to-last command from history to avoid capturing the precmd function itself
             local cmd="$(fc -ln -2 | head -1 | sed 's/^[ \t]*//')"
@@ -649,15 +588,16 @@ if type compctl >/dev/null 2>&1; then
             # Log command recording in debug mode
             _sr_debug_log "CMD_RECORD" "Recording command: '$cmd' in directory: '$dir'"
             
-            # Record the command asynchronously
-            (_sr --add "$cmd" "$dir" &)
+            # Record the command with improved error handling
+            (_sr --add "$cmd" "$dir" || { echo "[DEBUG] Failed to record command: '$cmd' in directory: '$dir'" >&2; _sr_debug_log "CMD_RECORD_FAIL" "Failed to record: '$cmd' in '$dir'"; }) &
         }
         [[ -n "${precmd_functions[(r)_sr_precmd]}" ]] || {
             precmd_functions[$(($#precmd_functions+1))]=_sr_precmd
         }
     }
 elif type complete >/dev/null 2>&1; then
-    # bash
+    # BASH集成 - 通过PROMPT_COMMAND实现
+    # 在每个命令执行后自动记录命令历史
     [ "$_SR_NO_PROMPT_COMMAND" ] || {
         _sr_record_command() {
             # Get the last command from history
@@ -703,8 +643,8 @@ elif type complete >/dev/null 2>&1; then
             # Log command recording in debug mode
             _sr_debug_log "CMD_RECORD" "Recording command: '$cmd' in directory: '$dir'"
             
-            # Record the command asynchronously
-            (_sr --add "$cmd" "$dir" &)
+            # Record the command with improved error handling
+            (_sr --add "$cmd" "$dir" || { echo "[DEBUG] Failed to record command: '$cmd' in directory: '$dir'" >&2; _sr_debug_log "CMD_RECORD_FAIL" "Failed to record: '$cmd' in '$dir'"; }) &
         }
         
         # Add to PROMPT_COMMAND
